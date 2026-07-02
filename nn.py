@@ -56,10 +56,7 @@ class Linear:
         in_grad = out_grad @ self.w.T
         return in_grad
 
-def zero_pad(x, padding):
-    pass
-
-class Convolution:
+class ConvLayer:
     def __init__(self, in_channels, kernel_size, n_filters, padding, stride):
         fan_in = in_channels * kernel_size * kernel_size
         self.w = np.random.randn(n_filters, in_channels, kernel_size, kernel_size) / np.sqrt(2/fan_in)
@@ -71,7 +68,37 @@ class Convolution:
         self.w_grad = None
         self.b_grad = None
     
+    # loop implementation
     def __call__(self, x):
-        b, c, h, w = x.shape
+        # cache input for backprop
+        self.x = x
 
-        x_pad = np.zeros(h + 2*self.padding, w + 2*self.padding)
+        b, c, h, w = x.shape
+        h_out = self.compute_output_dim(h)
+        w_out = self.compute_output_dim(w)
+
+        out = np.zeros((b, self.n_filters, h_out, w_out))
+        x_padded = np.pad(x, ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)), mode='constant')
+
+        for i in range(h_out):
+            for j in range(w_out):
+                h_start = i * self.stride
+                h_end = h_start + self.kernel_size
+                
+                w_start = j * self.stride
+                w_end = w_start + self.kernel_size
+
+                x_slice = x_padded[:, :, h_start:h_end, w_start:w_end]
+
+                # sum along filter dimension
+
+                for f in range(self.n_filters):
+                    # x_slice: [B, C_in, kernel_size, kernel_size]
+                    # out[:, :, i, j]: [B, n_filters, h_out, w_out]
+                    # w[f]: [C_in, kernel_size, kernel_size]
+                    # (x_slice * w[f]).sum(axis=(1, 2, 3)): [B]
+                    out[:, :, i, j] = (x_slice * self.w[f, :, :, :]).sum(axis=(1, 2, 3)) + self.b[f]
+        return out
+    
+    def compute_output_dim(self, d):
+        return int((d - self.kernel_size + 2 * self.padding) / self.stride + 1)
