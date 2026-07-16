@@ -59,14 +59,23 @@ class Linear:
 class ConvLayer:
     def __init__(self, in_channels, kernel_size, n_filters, padding, stride):
         fan_in = in_channels * kernel_size * kernel_size
+        
         self.w = np.random.randn(n_filters, in_channels, kernel_size, kernel_size) / np.sqrt(2/fan_in)
         self.b = np.random.randn(n_filters)
+        
+        self.c_in = in_channels
+        self.c_out = n_filters
+        self.k = kernel_size
         self.padding = padding
         self.stride = stride
 
         self.x = None
+        self.x_padded = None
         self.w_grad = None
         self.b_grad = None
+    
+    def compute_output_dim(self, d):
+        return int((d - self.k + 2 * self.padding) / self.stride + 1)
     
     # loop implementation
     def __call__(self, x):
@@ -77,28 +86,88 @@ class ConvLayer:
         h_out = self.compute_output_dim(h)
         w_out = self.compute_output_dim(w)
 
-        out = np.zeros((b, self.n_filters, h_out, w_out))
+        out = np.zeros((b, self.c_out, h_out, w_out))
         x_padded = np.pad(x, ((0, 0), (0, 0), (self.padding, self.padding), (self.padding, self.padding)), mode='constant')
+        self.x_padded = x_padded
 
         for i in range(h_out):
             for j in range(w_out):
                 h_start = i * self.stride
-                h_end = h_start + self.kernel_size
+                h_end = h_start + self.k
                 
                 w_start = j * self.stride
-                w_end = w_start + self.kernel_size
+                w_end = w_start + self.k
 
+                # x_slice: [B, C_in, kernel_size, kernel_size]
                 x_slice = x_padded[:, :, h_start:h_end, w_start:w_end]
 
-                # sum along filter dimension
-
-                for f in range(self.n_filters):
-                    # x_slice: [B, C_in, kernel_size, kernel_size]
-                    # out[:, :, i, j]: [B, n_filters, h_out, w_out]
+                # at position h_out, w_out: compute each filter across c_in
+                for f in range(self.c_out):
+                    # out[:, f, i, j]: [B, 1, 1, 1]
                     # w[f]: [C_in, kernel_size, kernel_size]
                     # (x_slice * w[f]).sum(axis=(1, 2, 3)): [B]
-                    out[:, :, i, j] = (x_slice * self.w[f, :, :, :]).sum(axis=(1, 2, 3)) + self.b[f]
+                    # b[f]: [B]
+                    out[:, f, i, j] = (x_slice * self.w[f, :, :, :]).sum(axis=(1, 2, 3)) + self.b[f]
         return out
+
+    def backward(self, out_grad):
+        # out_grad shape: [b, n_filters, h_out, w_out]
+        b, c_in, h_in, w_in = self.x.shape
+        _, c_out, h_out, w_out = out_grad.shape
+        self.w_grad = np.zeros((self.c_out, c_in, self.k, self.k))
+        self.b_grad = np.zeros((self.c_out,))
+        
+        # in_grad = np.zeros((b, self.c_in, h_in, w_in))
+        in_grad_padded = np.zeros((b, c_in, h_in + 2 * self.padding, w_in + 2 * self.padding))
+        
+        for i in range(h_out):
+            for j in range(w_out):
+                h_start = i * self.stride
+                h_end = h_start + self.k
+
+                w_start = j * self.stride
+                w_end = w_start + self.k
+
+                # Extract the exact input patch used during forward pass: (B, C_in, K, K)
+                x_slice = self.x_padded[:, :, h_start:h_end, w_start:w_end]
+                
+                for f in range(c_out):
+                    # Isolate the batch errors for this specific pixel and filter: (B,)
+                    out_grad_slice = out_grad[:, f, i, j]
+                    
+                    # BIAS GRADIENT: Sum all batch errors passing through this filter channel
+                    self.b_grad[f] += out_grad_slice.sum()
+                    
+                    # WEIGHT GRADIENT: Expand (B,) to (B,1,1,1) to broadcast multiply x_slice
+                    # w_grad[f]: (B, ) - x_slice: (B, c_in, k, k) - out_grad_slice: (B, )
+                    self.w_grad[f] += (x_slice * out_grad_slice[:, None, None, None]).sum(axis=0)
+                    
+                    # INPUT GRADIENT: Multiply the scalar errors by this filter's weights
+                    # w[f] shape: (C_in, K, K)
+                    # out_grad_slice[:, None, None, None] shape: (B, 1, 1, 1)
+                    # Result shape: (B, C_in, K, K)
+                    in_grad_padded[:, :, h_start:h_end, w_start:w_end] += (
+                        self.w[f] * out_grad_slice[:, None, None, None]
+                    )
+        
+        # 4. Remove padding borders to match the original unpadded input tensor 'x'
+        if self.padding > 0:
+            in_grad = in_grad_padded[:, :, self.padding:-self.padding, self.padding:-self.padding]
+        else:
+            in_grad = in_grad_padded
+        
+        return in_grad
     
-    def compute_output_dim(self, d):
-        return int((d - self.kernel_size + 2 * self.padding) / self.stride + 1)
+# TODO: fast convolution, implement pooling, train on MNIST, then start CIFAR
+# will neeed regularization techniques
+    
+class Flatten:
+    def __init__(self):
+        self.original_shape = None
+
+    def __call__(self, x):
+        self.original_shape = x.shape
+        return x.reshape(x.shape[0], -1)
+
+    def backward(self, out_grad):
+        return out_grad.reshape(self.original_shape)

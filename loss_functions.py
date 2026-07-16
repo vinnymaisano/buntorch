@@ -13,3 +13,6 @@ class MSELoss:
     def backward(self, out_grad=1):
         m = self.ypred.shape[0]
         return (2 / m) * (self.ypred - self.ytrue) * out_grad
+
+class CrossEntropyLoss:
+    pass
