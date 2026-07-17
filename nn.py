@@ -171,3 +171,78 @@ class Flatten:
 
     def backward(self, out_grad):
         return out_grad.reshape(self.original_shape)
+
+class MaxPooling2D:
+    def __init__(self, pool_size=2, stride=2):
+        self.pool_size = pool_size
+        self.stride = stride
+        
+        # Caches for backpropagation
+        self.x = None
+        
+    # downsampling formula: (d - pool_size) / stride + 1
+    def compute_output_dim(self, d):
+        return int((d - self.pool_size) / self.stride + 1)
+
+    def __call__(self, x):
+        # Cache the input tensor: shape [B, C, H, W]
+        self.x = x
+        
+        b, c, h, w = x.shape
+        h_out = self.compute_output_dim(h)
+        w_out = self.compute_output_dim(w)
+        
+        out = np.zeros((b, c, h_out, w_out))
+        
+        for i in range(h_out):
+            for j in range(w_out):
+                h_start = i * self.stride
+                h_end = h_start + self.pool_size
+                
+                w_start = j * self.stride
+                w_end = w_start + self.pool_size
+                
+                # Extract the patch across all batches and channels
+                # x_slice shape: [B, C, pool_size, pool_size]
+                x_slice = x[:, :, h_start:h_end, w_start:w_end]
+                
+                # Take the maximum value along the spatial dimensions (axes 2 and 3)
+                out[:, :, i, j] = np.max(x_slice, axis=(2, 3))
+                
+        return out
+
+    def backward(self, out_grad):
+        # out_grad shape: [B, C, h_out, w_out]
+        b, c, h_in, w_in = self.x.shape
+        _, _, h_out, w_out = out_grad.shape
+        
+        # Initialize input gradient with zeros
+        in_grad = np.zeros_like(self.x, dtype=np.float64)
+        
+        for i in range(h_out):
+            for j in range(w_out):
+                h_start = i * self.stride
+                h_end = h_start + self.pool_size
+                
+                w_start = j * self.stride
+                w_end = w_start + self.pool_size
+                
+                # 1. Grab the forward pass input patch
+                x_slice = self.x[:, :, h_start:h_end, w_start:w_end]
+                
+                # 2. Find the maximum value in this patch along the spatial axes
+                # We expand dims so it broadcasts perfectly with the 2D slice
+                max_val = np.max(x_slice, axis=(2, 3), keepdims=True)
+                
+                # 3. Create a boolean mask where True indicates the position of the max value
+                mask = (x_slice == max_val)
+                
+                # 4. Grab the gradient coming from the next layer for this pooled pixel
+                # Shape: [B, C, 1, 1] for broadcasting
+                grad_pixel = out_grad[:, :, i, j, None, None]
+
+                # 5. Route the gradient ONLY to the maximum value coordinates.
+                # If there are duplicate maximums, we divide the gradient evenly among them.
+                in_grad[:, :, h_start:h_end, w_start:w_end] += (mask * grad_pixel) / np.sum(mask, axis=(2, 3), keepdims=True)
+                
+        return in_grad
